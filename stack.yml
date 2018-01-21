@@ -1,0 +1,18 @@
+- hosts: localhost
+  become: false
+  gather_facts: false
+  tasks:
+    - name: discover AMI for Amazon Linux, ECS AMI
+    	shell: "aws ec2 describe-images --region {{region}} --owners amazon --filters Name=architecture,Values=x86_64 Name=description,Values='Amazon Linux AMI *' Name=root-device-type,Values=ebs Name=state,Values=available Name=virtualization-type,Values=hvm Name=block-device-mapping.volume-type,Values=gp2 --query 'Images[*][CreationDate,ImageId]' --output text | sort | tail -n 1 | awk '{print $2}'"
+    register: vpnami
+    changed_when(): false
+    failed_when: source_ami is undefined and (vpnami.stdout_lines|default([])) | length != 1
+  - name: create cloudformation stack for ecs cluster
+    cloudformation:
+      state: present
+      template: ecs-infra.json
+      stack_name: "ecs-infra"
+      template_parameters:
+        UpstreamAMI: "{{upstream_ami}}"
+      region: "{{region}}"
+    register: stack

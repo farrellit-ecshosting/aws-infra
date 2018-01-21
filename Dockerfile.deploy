@@ -1,0 +1,7 @@
+FROM python:3-alpine
+RUN apk add --no-cache openssl-dev libffi-dev build-base
+RUN pip install ansible boto3 awscli
+RUN mkdir /code
+WORKDIR /code
+ENTRYPOINT [ "ansible-playbook", "-i", "localhost,"  ]
+CMD [ "stack.yml" ]
