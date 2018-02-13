@@ -1,0 +1,232 @@
+{
+  "AWSTemplateFormatVersion":"2010-09-09",
+  "Parameters": { 
+  		"DomainName": {  "Type": "String"},
+  		"CertVerifyDomain": {  "Type": "String"},
+		"HostedZone": { "Type": "String" },
+		"InfraStack": { "Type": "String" }
+  },
+  "Resources":{
+    "CloudwatchLogsGroup":{
+      "Type":"AWS::Logs::LogGroup",
+      "Properties":{
+        "LogGroupName":{ "Fn::Sub": "${DomainName}-wordpress" },
+        "RetentionInDays":14
+      }
+    },
+    "taskdefinition":{
+      "Type":"AWS::ECS::TaskDefinition",
+      "Properties":{
+        "Family":{ "Ref": "AWS::StackName" },
+        "ContainerDefinitions":[
+          {
+            "Name": "wordpress",
+            "Cpu":"10",
+            "Essential":"true",
+            "Image":"wordpress",
+            "Memory":"128",
+            "LogConfiguration":{
+              "LogDriver":"awslogs",
+              "Options":{
+                "awslogs-group":{ "Ref":"CloudwatchLogsGroup" },
+                "awslogs-region":{
+                  "Ref":"AWS::Region"
+                },
+                "awslogs-stream-prefix":"wordpress"
+              }
+            },
+            "PortMappings":[
+              {
+                "ContainerPort":80
+              }
+            ]
+          },
+          {
+            "Name":{ "Fn::Sub": "mysql" },
+            "Cpu":10,
+            "Image":"mysql:5.7",
+            "Memory":192,
+            "LogConfiguration":{
+              "LogDriver":"awslogs",
+              "Options":{
+                "awslogs-group":{ "Ref":"CloudwatchLogsGroup" },
+                "awslogs-region":{
+                  "Ref":"AWS::Region"
+                },
+                "awslogs-stream-prefix": "mysql"
+              }
+            }
+          }
+        ]
+      }
+    },
+	 "mycert" : {
+  		"Type" : "AWS::CertificateManager::Certificate",
+  		"Properties" : {
+    		"DomainName" : { "Ref": "DomainName" },
+    		"DomainValidationOptions" : [{
+    			"DomainName" : { "Ref": "DomainName" },
+      		"ValidationDomain" : { "Ref": "CertVerifyDomain" }
+    		}]
+  		}
+	 },
+	 "ListenerCert": {
+ 	 	"Type" : "AWS::ElasticLoadBalancingV2::ListenerCertificate",
+  		"Properties" : {
+    		"Certificates" : [ { "CertificateArn": { "Ref": "mycert" } } ],
+    		"ListenerArn" :  { "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:HttpsListener"} }
+ 	 	}
+	},
+    "ECSALBListenerRule":{
+      "Type":"AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties":{
+        "Actions":[
+          {
+            "Type":"forward",
+            "TargetGroupArn":{
+              "Ref":"ECSTG"
+            }
+          }
+        ],
+        "Conditions":[
+          {
+            "Field":"host-header",
+            "Values":[
+              { "Ref": "DomainName" }
+            ]
+          }
+        ],
+    	  "ListenerArn" :  { "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:HttpsListener"} },
+        "Priority":1
+      }
+    },
+    "ServiceDNS": {
+      "Type" : "AWS::Route53::RecordSet",
+      "Properties" : {
+         "HostedZoneName" : {"Ref" : "HostedZone"},
+         "Name" : { "Ref": "DomainName" },
+			"Type": "A",
+ 			"AliasTarget" : {
+           "HostedZoneId" : { "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:ALBZoneId"}},
+           "DNSName" : { "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:ALBDNS"}}
+         }
+      }
+   },
+    "ECSTG":{
+      "Type":"AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties":{
+        "HealthCheckIntervalSeconds":10,
+        "HealthCheckPath":"/",
+        "HealthCheckProtocol":"HTTP",
+        "HealthCheckTimeoutSeconds":5,
+        "HealthyThresholdCount":2,
+        "Port":80,
+        "Protocol":"HTTP",
+        "UnhealthyThresholdCount":2,
+        "VpcId":{ "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:VpcId"} }
+      }
+    },
+    "service":{
+      "Type":"AWS::ECS::Service",
+      "DependsOn":"ECSALBListenerRule",
+      "Properties":{
+        "Cluster":{ "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:ECSCluster"} },
+        "DesiredCount":"1",
+        "LoadBalancers":[
+          {
+            "ContainerName":"wordpress",
+            "ContainerPort":"80",
+            "TargetGroupArn":{
+              "Ref":"ECSTG"
+            }
+          }
+        ],
+        "Role":{
+          "Ref":"ECSServiceRole"
+        },
+        "TaskDefinition":{
+          "Ref":"taskdefinition"
+        }
+      }
+    },
+    "ECSServiceRole":{
+      "Type":"AWS::IAM::Role",
+      "Properties":{
+        "AssumeRolePolicyDocument":{
+          "Statement":[
+            {
+              "Effect":"Allow",
+              "Principal":{
+                "Service":[
+                  "ecs.amazonaws.com"
+                ]
+              },
+              "Action":[
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path":"/",
+        "Policies":[
+          {
+            "PolicyName":"ecs-service",
+            "PolicyDocument":{
+              "Statement":[
+                {
+                  "Effect":"Allow",
+                  "Action":[
+                    "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:Describe*",
+                    "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                    "elasticloadbalancing:RegisterTargets",
+                    "ec2:Describe*",
+                    "ec2:AuthorizeSecurityGroupIngress"
+                  ],
+                  "Resource":"*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ServiceScalingTarget":{
+      "Type":"AWS::ApplicationAutoScaling::ScalableTarget",
+      "DependsOn":"service",
+      "Properties":{
+        "MaxCapacity":2,
+        "MinCapacity":1,
+        "ResourceId":{ "Fn::Sub": [ "service/${ECSCluster}/${service.Name}", {
+		  		"ECSCluster": { "Fn::ImportValue": { "Fn::Sub": "${InfraStack}:ECSCluster"} }  
+				}
+			]},
+        "RoleARN":{ "Fn::ImportValue":{"Fn::Sub": "${InfraStack}:AutoScalingRoleArn"} },
+        "ScalableDimension":"ecs:service:DesiredCount",
+        "ServiceNamespace":"ecs"
+      }
+    },
+    "ServiceScalingPolicy":{
+      "Type":"AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties":{
+        "PolicyName":"AStepPolicy",
+        "PolicyType":"StepScaling",
+        "ScalingTargetId":{
+          "Ref":"ServiceScalingTarget"
+        },
+        "StepScalingPolicyConfiguration":{
+          "AdjustmentType":"PercentChangeInCapacity",
+          "Cooldown":60,
+          "MetricAggregationType":"Average",
+          "StepAdjustments":[
+            {
+              "MetricIntervalLowerBound":0,
+              "ScalingAdjustment":200
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,8 +1,9 @@
 {
   "AWSTemplateFormatVersion":"2010-09-09",
   "Parameters":{
-    "KeyName":{
-      "Type":"AWS::EC2::KeyPair::KeyName",
+    "KeyName":{	
+	 	"Default": "",
+      "Type":"String",
       "Description":"Name of an existing EC2 KeyPair to enable SSH access to the ECS instances."
     },
     "VpcId":{
@@ -11,7 +12,7 @@
     },
     "SubnetId":{
       "Type":"List<AWS::EC2::Subnet::Id>",
-      "Description":"Select at two subnets in your selected VPC."
+      "Description":"Select at least two subnets in your selected VPC."
     },
     "DesiredCapacity":{
       "Type":"Number",
@@ -26,74 +27,12 @@
     "InstanceType":{
       "Description":"EC2 instance type",
       "Type":"String",
-      "Default":"t2.micro",
-      "AllowedValues":[
-        "t2.micro",
-        "t2.small",
-        "t2.medium",
-        "t2.large",
-        "m3.medium",
-        "m3.large",
-        "m3.xlarge",
-        "m3.2xlarge",
-        "m4.large",
-        "m4.xlarge",
-        "m4.2xlarge",
-        "m4.4xlarge",
-        "m4.10xlarge",
-        "c4.large",
-        "c4.xlarge",
-        "c4.2xlarge",
-        "c4.4xlarge",
-        "c4.8xlarge",
-        "c3.large",
-        "c3.xlarge",
-        "c3.2xlarge",
-        "c3.4xlarge",
-        "c3.8xlarge",
-        "r3.large",
-        "r3.xlarge",
-        "r3.2xlarge",
-        "r3.4xlarge",
-        "r3.8xlarge",
-        "i2.xlarge",
-        "i2.2xlarge",
-        "i2.4xlarge",
-        "i2.8xlarge"
-      ],
-      "ConstraintDescription":"Please choose a valid instance type."
-    }
+      "Default":"t2.micro"
+    },
+	 "ImageId": { "Type": "AWS::EC2::Image::Id" }
   },
-  "Mappings":{
-    "AWSRegionToAMI":{
-      "us-east-1":{
-        "AMIID":"ami-eca289fb"
-      },
-      "us-east-2":{
-        "AMIID":"ami-446f3521"
-      },
-      "us-west-1":{
-        "AMIID":"ami-9fadf8ff"
-      },
-      "us-west-2":{
-        "AMIID":"ami-7abc111a"
-      },
-      "eu-west-1":{
-        "AMIID":"ami-a1491ad2"
-      },
-      "eu-central-1":{
-        "AMIID":"ami-54f5303b"
-      },
-      "ap-northeast-1":{
-        "AMIID":"ami-9cd57ffd"
-      },
-      "ap-southeast-1":{
-        "AMIID":"ami-a900a3ca"
-      },
-      "ap-southeast-2":{
-        "AMIID":"ami-5781be34"
-      }
-    }
+  "Conditions": {
+  	"Key": { "Fn::Not": [ { "Fn::Equals": [ { "Ref": "KeyName" }, "" ] } ] }
   },
   "Resources":{
     "ECSCluster":{
@@ -108,6 +47,18 @@
         }
       }
     },
+	 "HttpsInbound": {
+      "Type":"AWS::EC2::SecurityGroupIngress",
+      "Properties":{
+        "GroupId":{
+          "Ref":"EcsSecurityGroup"
+        },
+        "IpProtocol":"tcp",
+        "FromPort":"443",
+        "ToPort":"443",
+        "CidrIp":"0.0.0.0/0"
+      }
+    },
     "EcsSecurityGroupHTTPinbound":{
       "Type":"AWS::EC2::SecurityGroupIngress",
       "Properties":{
@@ -117,18 +68,6 @@
         "IpProtocol":"tcp",
         "FromPort":"80",
         "ToPort":"80",
-        "CidrIp":"0.0.0.0/0"
-      }
-    },
-    "EcsSecurityGroupSSHinbound":{
-      "Type":"AWS::EC2::SecurityGroupIngress",
-      "Properties":{
-        "GroupId":{
-          "Ref":"EcsSecurityGroup"
-        },
-        "IpProtocol":"tcp",
-        "FromPort":"22",
-        "ToPort":"22",
         "CidrIp":"0.0.0.0/0"
       }
     },
@@ -254,7 +193,7 @@
         "Scheme":"internet-facing",
         "LoadBalancerAttributes":[
           {
-            "Key":"idle_timeout.timeout_seconds",
+           "Key":"idle_timeout.timeout_seconds",
             "Value":"30"
           }
         ],
@@ -266,6 +205,37 @@
             "Ref":"EcsSecurityGroup"
           }
         ]
+      }
+    },
+	 
+	 "DefaultCert" : {
+  		"Type" : "AWS::CertificateManager::Certificate",
+  		"Properties" : {
+    		"DomainName" : "demo.ecs.farrellit.net",
+    		"DomainValidationOptions" : [{
+    			"DomainName" : "demo.ecs.farrellit.net",
+      		"ValidationDomain" : "demo.ecs.farrellit.net"
+    		}]
+  		}
+	 },
+	 "HTTPSListener": {
+      "Type":"AWS::ElasticLoadBalancingV2::Listener",
+      "DependsOn":"ECSServiceRole",
+      "Properties":{
+        "DefaultActions":[
+          {
+            "Type":"forward",
+            "TargetGroupArn":{
+              "Ref":"ECSTG"
+            }
+          }
+        ],
+        "LoadBalancerArn":{
+          "Ref":"ECSALB"
+        },
+        "Port":"443",
+        "Protocol":"HTTPS",
+		  "Certificates": [ { "CertificateArn": { "Ref": "DefaultCert" } } ]
       }
     },
     "ALBListener":{
@@ -301,9 +271,9 @@
         ],
         "Conditions":[
           {
-            "Field":"path-pattern",
+            "Field":"host-header",
             "Values":[
-              "/"
+              "demo.ecs.farrellit.net"
             ]
           }
         ],
@@ -313,6 +283,19 @@
         "Priority":1
       }
     },
+    "ServiceDNS": {
+      "Type" : "AWS::Route53::RecordSet",
+      "Properties" : {
+         "HostedZoneName" : "ecs.farrellit.net.",
+         "Name" : "demo.ecs.farrellit.net.", 
+			"Type": "A",
+ 			"AliasTarget" : {
+           "HostedZoneId" : { "Fn::GetAtt" : ["ECSALB", "CanonicalHostedZoneID"] },
+           "DNSName" : { "Fn::GetAtt" : ["ECSALB","DNSName"] }
+         }
+      }
+   },
+
     "ECSTG":{
       "Type":"AWS::ElasticLoadBalancingV2::TargetGroup",
       "DependsOn":"ECSALB",
@@ -362,15 +345,7 @@
     "ContainerInstances":{
       "Type":"AWS::AutoScaling::LaunchConfiguration",
       "Properties":{
-        "ImageId":{
-          "Fn::FindInMap":[
-            "AWSRegionToAMI",
-            {
-              "Ref":"AWS::Region"
-            },
-            "AMIID"
-          ]
-        },
+        "ImageId":{ "Ref": "ImageId" },
         "SecurityGroups":[
           {
             "Ref":"EcsSecurityGroup"
@@ -382,9 +357,7 @@
         "IamInstanceProfile":{
           "Ref":"EC2InstanceProfile"
         },
-        "KeyName":{
-          "Ref":"KeyName"
-        },
+        "KeyName":{ "Fn::If": [ "Key", { "Ref": "KeyName" }, { "Ref": "AWS::NoValue" } ] },
         "UserData":{
           "Fn::Base64":{
             "Fn::Join":[
@@ -665,36 +638,12 @@
     }
   },
   "Outputs":{
-    "ecsservice":{
-      "Value":{
-        "Ref":"service"
-      }
-    },
-    "ecscluster":{
-      "Value":{
-        "Ref":"ECSCluster"
-      }
-    },
-    "ECSALB":{
-      "Description":"Your ALB DNS URL",
-      "Value":{
-        "Fn::Join":[
-          "",
-          [
-            {
-              "Fn::GetAtt":[
-                "ECSALB",
-                "DNSName"
-              ]
-            }
-          ]
-        ]
-      }
-    },
-    "taskdef":{
-      "Value":{
-        "Ref":"taskdefinition"
-      }
-    }
+	 "AutoScalingRoleArn": { "Value": { "Fn::GetAtt": [ "AutoscalingRole", "Arn" ] }, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:AutoScalingRoleArn" } } },
+  	 "VpcId": { "Value": {"Ref": "VpcId"}, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:VpcId"} } },
+  	 "ECSCluster": { "Value": {"Ref": "ECSCluster"}, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:ECSCluster"} } },
+	 "ALBArn": { "Value": { "Ref" : "ECSALB" }, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:ALBArn"} } },
+    "ALBZoneId" : {  "Value": { "Fn::GetAtt" : ["ECSALB", "CanonicalHostedZoneID"] }, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:ALBZoneId"} } },
+    "ALBDNS" : { "Value": { "Fn::GetAtt" : ["ECSALB","DNSName"] }, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:ALBDNS"} } },
+    "HttpsListener" : {  "Value": { "Ref" : "HTTPSListener" }, "Export": { "Name": { "Fn::Sub": "${AWS::StackName}:HttpsListener"} } }
   }
 }

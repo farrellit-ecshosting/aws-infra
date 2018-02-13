@@ -1,18 +1,80 @@
 - hosts: localhost
   become: false
   gather_facts: false
+  vars:
+    region: us-east-1
+    infra_stack_name: ecs-infra
+    AppTypes:
+      wordpress:
+         Template: "app.yml"
+    Applications:
+    - DomainName: wordpress.ecs.farrellit.net
+      HostedZone: ecs.farrellit.net. # make sure this ends in a dot
+      CertVerifyDomain: farrellit.net # note this has to equal DomainName or a superdomain ( admin will have to approve email )
+  pre_tasks:
+  - name: check json
+    command: aws --region {{region}} cloudformation validate-template --template-body file://{{item}}
+    changed_when: false
+    with_items: 
+    - fleet.json
+    - app.json
   tasks:
-    - name: discover AMI for Amazon Linux, ECS AMI
-    	shell: "aws ec2 describe-images --region {{region}} --owners amazon --filters Name=architecture,Values=x86_64 Name=description,Values='Amazon Linux AMI *' Name=root-device-type,Values=ebs Name=state,Values=available Name=virtualization-type,Values=hvm Name=block-device-mapping.volume-type,Values=gp2 --query 'Images[*][CreationDate,ImageId]' --output text | sort | tail -n 1 | awk '{print $2}'"
-    register: vpnami
-    changed_when(): false
-    failed_when: source_ami is undefined and (vpnami.stdout_lines|default([])) | length != 1
+  - name: discover AMI for Amazon Linux, ECS AMI
+    # this takes a long time so I cache it below, but it works to update
+    #shell: "aws ec2 describe-images --region {{region}} --owners amazon --filters Name=architecture,Values=x86_64 Name=description,Values='Amazon Linux AMI * x86_64 ECS HVM GP2' Name=root-device-type,Values=ebs Name=state,Values=available Name=virtualization-type,Values=hvm Name=block-device-mapping.volume-type,Values=gp2 --query 'Images[*][CreationDate,ImageId]' --output text | sort | tail -n 1 | awk '{print $2}'"
+    shell: echo ami-28456852
+    register: upstream_ami
+    changed_when: false
+    failed_when: source_ami is undefined and (upstream_ami.stdout_lines|default([])) | length != 1
+  - name: discover default vpc 
+    shell: aws ec2 describe-vpcs --filters Name=isDefault,Values=true --region {{region}} --output text --query 'Vpcs[0].VpcId'
+    changed_when: false
+    register: vpc
+  - name: discover subnets
+    shell: aws ec2 describe-subnets --filters Name=vpc-id,Values={{vpc.stdout}} --region {{region}} --query Subnets[*][SubnetId] --output text
+    changed_when: false
+    register: subnets
   - name: create cloudformation stack for ecs cluster
     cloudformation:
       state: present
-      template: ecs-infra.json
-      stack_name: "ecs-infra"
+      template: fleet.json
+      stack_name: "{{ infra_stack_name}}"
       template_parameters:
-        UpstreamAMI: "{{upstream_ami}}"
+        ImageId: "{{upstream_ami.stdout_lines[0]}}"
+        VpcId: "{{vpc.stdout}}"
+        SubnetId: "{{ subnets.stdout_lines|join(',') }}"
       region: "{{region}}"
     register: stack
+
+  # with some work, you could add version to this and 
+  # canary/weighted deployments.  Really cool, if you could also route
+  # the traffic by prefix
+  
+  - name: cleanup existing cloudformation stacks that have been rolled back from creation
+    command: aws cloudformation --region {{region}} describe-stacks --stack-name "ECS-{{item.DomainName|regex_replace('[.]', '-')}}{%if 'Version' in item%}-{{item.Version}}{%endif%}" --query 'Stacks[*][[StackStatus],[StackId]]' --output text
+    register: existing_state
+    failed_when: false
+    with_items: "{{Applications}}"
+  - name: remove stacks rolled back on creation
+    shell: aws cloudformation --region {{region}} delete-stack --stack-name {{ item.stdout_lines[1] }}
+    with_items: "{{existing_state.results}}"
+    when: item.rc == 0 and  item.stdout_lines[0] == "ROLLBACK_COMPLETE"
+    register: remove_result
+  - debug: var=remove_result
+  - name: wait for stacks to delete
+    shell: aws cloudformation --region {{region}} describe-stacks --stack-name "{{ item.item.stdout_lines[1] }}" --query Stacks[*][StackStatus] --output text
+    delay: 3
+    retries: 10
+    until: ( "DELETE_COMPLETE" in wait_result.stdout )
+    with_items: "{{ remove_result.results }}"
+    when: not (item.skipped|default(false))
+    register: wait_result
+
+  - name: create cloudformation stack for apps
+    cloudformation:
+      state: present
+      template: app.json
+      stack_name: "ECS-{{item.DomainName|regex_replace('[.]', '-')}}{%if 'Version' in item%}-{{item.Version}}{%endif%}"
+      template_parameters: "{{ item | combine({'InfraStack': infra_stack_name}) }}"
+      region: "{{region}}"
+    with_items: "{{Applications}}"
